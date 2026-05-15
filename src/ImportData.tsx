@@ -1,37 +1,51 @@
 import { useState } from 'react';
 import { Upload, X, FileText, CheckCircle2, AlertCircle } from 'lucide-react';
-import Papa from 'papaparse';
 
 interface ImportViewProps {
   onComplete: (data: any[]) => void;
   onCancel: () => void;
 }
 
+const API_URL = 'http://127.0.0.1:8000/api/predict/upload';
+
 export default function ImportView({ onComplete, onCancel }: ImportViewProps) {
   const [file, setFile] = useState<File | null>(null);
   const [isParsing, setIsParsing] = useState(false);
+  const [error, setError] = useState('');
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files[0]) {
       setFile(e.target.files[0]);
+      setError('');
     }
   };
 
-  const handleUpload = () => {
+  const handleUpload = async () => {
     if (!file) return;
     setIsParsing(true);
+    setError('');
 
-    Papa.parse(file, {
-      header: true,
-      skipEmptyLines: true,
-      complete: (results) => {
-        // จำลองการประมวลผล 1.5 วินาทีเพื่อให้ดูเหมือนระบบกำลังคิด
-        setTimeout(() => {
-          onComplete(results.data);
-          setIsParsing(false);
-        }, 1500);
-      },
-    });
+    try {
+      const formData = new FormData();
+      formData.append('file', file);
+
+      const response = await fetch(API_URL, {
+        method: 'POST',
+        body: formData,
+      });
+
+      const result = await response.json();
+
+      if (!response.ok) {
+        throw new Error(result.detail || 'Upload failed');
+      }
+
+      onComplete(result.members || []);
+    } catch (err: any) {
+      setError(err.message || 'ไม่สามารถเชื่อมต่อ backend ได้ กรุณารัน FastAPI ก่อน');
+    } finally {
+      setIsParsing(false);
+    }
   };
 
   return (
@@ -41,7 +55,7 @@ export default function ImportView({ onComplete, onCancel }: ImportViewProps) {
           <Upload className="text-gray-600" size={28} />
         </div>
         <h2 className="text-xl font-bold text-gray-900">Import Member Data</h2>
-        <p className="text-gray-500 text-sm mt-1">Upload CSV file for Churn Analysis</p>
+        <p className="text-gray-500 text-sm mt-1">Upload CSV file to Backend for Churn Analysis</p>
       </div>
 
       <div className={`relative border-2 border-dashed rounded-xl p-10 transition-all text-center ${
@@ -72,9 +86,15 @@ export default function ImportView({ onComplete, onCancel }: ImportViewProps) {
       <div className="mt-6 flex gap-3 p-4 bg-blue-50 rounded-lg border border-blue-100 text-left">
         <AlertCircle className="text-blue-500 shrink-0" size={20} />
         <p className="text-xs text-blue-700">
-          <strong>Note:</strong> Ensure CSV has <code className="font-bold">Member_ID</code> and <code className="font-bold">Activity_Score</code> columns.
+          <strong>Backend API:</strong> ระบบจะส่งไฟล์ไปที่ <code className="font-bold">127.0.0.1:8000</code> แล้วรับผลลัพธ์ Risk Score กลับมาแสดงบน Dashboard
         </p>
       </div>
+
+      {error && (
+        <div className="mt-4 p-4 bg-red-50 border border-red-100 rounded-lg text-sm text-red-700">
+          {error}
+        </div>
+      )}
 
       <div className="mt-8 flex gap-3">
         <button 
@@ -97,7 +117,7 @@ export default function ImportView({ onComplete, onCancel }: ImportViewProps) {
           ) : (
             <>
               <CheckCircle2 size={20} />
-              Start Analysis
+              Send to Backend
             </>
           )}
         </button>
