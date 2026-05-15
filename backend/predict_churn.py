@@ -19,7 +19,7 @@ from openai import OpenAI
 # ─────────────────────────────────────────────
 INPUT_CSV        = "input.csv"                        
 OUTPUT_CSV       = f"crm_output_FULL_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
-TYPHOON_API_KEY  = "ใส่ของตัวเอง"
+TYPHOON_API_KEY  = "sk-1C1fjI9tGJfyX3lbnA2KhPCXZTFFWgzUV5PVxlUlHY5jGYCK"
 TYPHOON_MODEL    = "typhoon-v2.5-30b-a3b-instruct"
 TYPHOON_BASE_URL = "https://api.opentyphoon.ai/v1"
 
@@ -118,18 +118,36 @@ def promotion_action(prob: float) -> str:
 # 6. SHAP EXPLAINABILITY
 # ─────────────────────────────────────────────
 def build_explainer(model, X_train):
-    print("[...] กำลังสร้าง SHAP Explainer (ใช้เวลาสักครู่)...")
-    background = shap.kmeans(X_train, 10)
-    explainer = shap.KernelExplainer(model.predict_proba, background)
+    print("[...] กำลังสร้าง SHAP TreeExplainer (RF + XGBoost)...")
+    rf  = model.estimators_[0]  # RandomForestClassifier
+    xgb = model.estimators_[1]  # XGBClassifier
+    explainer_rf  = shap.TreeExplainer(rf)
+    explainer_xgb = shap.TreeExplainer(xgb)
     print("[OK] Explainer พร้อมแล้ว")
-    return explainer
+    return (explainer_rf, explainer_xgb)
+
 
 def compute_shap_values(explainer, X_test):
-    n = len(X_test)
-    print(f"[...] คำนวณ SHAP สำหรับ {n:,} คน... (ชงกาแฟรอได้เลย)")
-    shap_values = explainer.shap_values(X_test)
+    explainer_rf, explainer_xgb = explainer
+    print(f"[...] คำนวณ SHAP สำหรับ {len(X_test):,} คน...")
+    shap_rf  = explainer_rf.shap_values(X_test)
+    shap_xgb = explainer_xgb.shap_values(X_test)
+
+    # normalize ให้เป็น shape (n_samples, n_features) ทั้งคู่
+    # RF อาจคืน list หรือ ndarray 3D → ดึง class=1 (churn)
+    if isinstance(shap_rf, list):
+        shap_rf = shap_rf[1]
+    elif isinstance(shap_rf, np.ndarray) and shap_rf.ndim == 3:
+        shap_rf = shap_rf[:, :, 1]
+
+    if isinstance(shap_xgb, list):
+        shap_xgb = shap_xgb[1]
+    elif isinstance(shap_xgb, np.ndarray) and shap_xgb.ndim == 3:
+        shap_xgb = shap_xgb[:, :, 1]
+
+    shap_avg = (shap_rf + shap_xgb) / 2
     print("[OK] SHAP คำนวณเสร็จแล้ว")
-    return shap_values
+    return shap_avg
 
 def get_shap_reasons(customer_idx: int, shap_values, feature_names) -> str:
     try:

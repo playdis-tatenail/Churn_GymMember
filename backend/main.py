@@ -1,15 +1,36 @@
+"""
+Gym Member Churn Backend
+รับ CSV → ใช้ predict_churn.py (Stacking Ensemble + SHAP) → Typhoon AI → return JSON
+"""
+
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
 import pandas as pd
 import io
-import math
-from typing import Any, Dict, List, Optional
+import os
+import traceback
+from typing import Any, Dict, List
 
+# ── Import pipeline จาก predict_churn.py ──────────────────────────────────────
+from predict_churn import (
+    prepare_features,
+    train_model,
+    evaluate_model,
+    build_explainer,
+    compute_shap_values,
+    build_report,
+    generate_call_script,
+    generate_staff_brief,
+    TYPHOON_API_KEY,
+    TYPHOON_BASE_URL,
+)
+from openai import OpenAI
+
+# ── App setup ─────────────────────────────────────────────────────────────────
 app = FastAPI(
     title="Gym Member Churn Backend",
-    description="Backend API for uploading gym member CSV files and returning churn-risk results.",
-    version="1.0.0",
+    description="Backend API: Upload CSV → Stacking ML + SHAP + Typhoon AI → Churn insights",
+    version="2.0.0",
 )
 
 app.add_middleware(
@@ -25,161 +46,80 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-class MemberResult(BaseModel):
-    id: str
-    name: str
-    email: Optional[str] = ""
-    phone: Optional[str] = ""
-    riskScore: float
-    status: str
-    aiInsight: str
-    aiScript: str
-    recommendedAction: str
+# ── Typhoon client (ใช้ env ก่อน ถ้าไม่มีค่อยใช้จาก predict_churn config) ────
+_typhoon_key = os.environ.get("TYPHOON_API_KEY", TYPHOON_API_KEY)
+_typhoon_client: OpenAI | None = None
+if _typhoon_key and _typhoon_key not in ("ใส่ของตัวเอง", "YOUR_API_KEY_HERE", ""):
+    _typhoon_client = OpenAI(api_key=_typhoon_key, base_url=TYPHOON_BASE_URL)
 
 
-def safe_value(row: pd.Series, candidates: List[str], default: Any = "") -> Any:
-    """Read a value from possible column names."""
-    lower_map = {str(c).strip().lower(): c for c in row.index}
-    for key in candidates:
-        col = lower_map.get(key.lower())
-        if col is not None:
-            value = row.get(col)
-            if pd.notna(value):
-                return value
-    return default
-
-
-def to_float(value: Any, default: float = 0.0) -> float:
+# ── Helper ────────────────────────────────────────────────────────────────────
+def _llm_insight(row: pd.Series) -> str:
+    """เรียก Typhoon สร้าง staff brief; ถ้าไม่มี key ใช้ fallback"""
+    if _typhoon_client is None:
+        reasons = row.get("Churn_Reasons", "ไม่มีข้อมูล")
+        return (
+            f"ความเสี่ยง {row['Risk_Level']} ({row['Probability (%)']:.1f}%)"
+            f" — สาเหตุ: {reasons}"
+        )
     try:
-        if value is None or (isinstance(value, float) and math.isnan(value)):
-            return default
-        return float(value)
-    except Exception:
-        return default
+        return generate_staff_brief(row, _typhoon_client)
+    except Exception as e:
+        return f"[LLM error] {e}"
 
 
-def clamp(value: float, low: float = 0.0, high: float = 1.0) -> float:
-    return max(low, min(high, value))
+def _llm_script(row: pd.Series) -> str:
+    """เรียก Typhoon สร้าง call script; ถ้าไม่มี key ใช้ fallback"""
+    if _typhoon_client is None:
+        name  = row.get("Customer_Name", "ลูกค้า")
+        promo = row.get("Promotion", "")
+        level = row.get("Risk_Level", "")
+        if level == "High Risk":
+            return (
+                f"สวัสดีครับคุณ {name} ช่วงนี้ทางยิมเห็นว่าคุณอาจไม่ได้เข้ามาบ่อยเหมือนเดิม "
+                f"เลยอยากชวนกลับมาเริ่มใหม่พร้อมสิทธิ์ {promo} ครับ"
+            )
+        if level == "Medium Risk":
+            return (
+                f"สวัสดีครับคุณ {name} ทางยิมมีโปรโมชัน {promo} "
+                f"สำหรับสมาชิกที่อยากกลับมาออกกำลังกายสม่ำเสมอครับ"
+            )
+        return (
+            f"สวัสดีครับคุณ {name} ขอบคุณที่ยังเป็นสมาชิกกับทางยิมนะครับ "
+            f"มีคำแนะนำใดๆ สามารถติดต่อทีมงานได้เลยครับ"
+        )
+    try:
+        return generate_call_script(row, _typhoon_client)
+    except Exception as e:
+        return f"[LLM error] {e}"
 
 
-def normalize_activity_score(raw_score: Any) -> Optional[float]:
-    """Accept Activity_Score as 0-1, 0-100, or reversed activity score."""
-    if raw_score is None or raw_score == "":
-        return None
-    score = to_float(raw_score, default=-1)
-    if score < 0:
-        return None
-    if score > 1:
-        score = score / 100.0
-    return clamp(score)
+def _safe_str(val: Any) -> str:
+    import math
+    if val is None:
+        return ""
+    if isinstance(val, float) and math.isnan(val):
+        return ""
+    return str(val)
 
 
-def calculate_risk(row: pd.Series) -> float:
-    """
-    Rule-based churn risk for demo/backend integration.
-    ถ้ามี Activity_Score จะใช้ค่านั้นเป็น risk โดยตรง
-    ถ้าไม่มี จะคำนวณจากพฤติกรรมการเข้าใช้งาน, สัญญา และค่าใช้จ่ายเสริม
-    """
-    direct_risk = normalize_activity_score(safe_value(row, ["Activity_Score", "Risk_Score", "riskScore"], ""))
-    if direct_risk is not None:
-        return round(direct_risk, 4)
-
-    freq = to_float(safe_value(row, ["Avg_class_frequency_current_month", "Class_Freq", "Frequency"], 0))
-    contract = to_float(safe_value(row, ["Contract_period", "Contract", "Contract_Period"], 1), 1)
-    months_left = to_float(safe_value(row, ["Month_to_end_contract", "Months_Left"], contract), contract)
-    charges = to_float(safe_value(row, ["Avg_additional_charges_total", "Add_Charges"], 0))
-    lifetime = to_float(safe_value(row, ["Lifetime"], 1), 1)
-
-    risk = 0.15
-    if freq <= 0.5:
-        risk += 0.42
-    elif freq <= 1.5:
-        risk += 0.25
-    elif freq <= 2.5:
-        risk += 0.12
-
-    if months_left <= 1:
-        risk += 0.18
-    elif months_left <= 3:
-        risk += 0.10
-
-    if contract <= 1:
-        risk += 0.10
-    if charges <= 20:
-        risk += 0.08
-    if lifetime <= 2:
-        risk += 0.07
-
-    return round(clamp(risk), 4)
-
-
-def get_status(score: float) -> str:
-    if score >= 0.70:
-        return "High Risk"
-    if score >= 0.40:
-        return "Medium Risk"
-    return "Low Risk"
-
-
-def get_action(score: float) -> str:
-    if score >= 0.70:
-        return "โทรติดตาม + เสนอ Personal Trainer ฟรี 1 ครั้ง"
-    if score >= 0.40:
-        return "ส่งโปรโมชัน/ข้อความกระตุ้นให้กลับมาออกกำลังกาย"
-    return "ดูแลตามปกติ"
-
-
-def build_insight(row: pd.Series, score: float) -> str:
-    freq = safe_value(row, ["Avg_class_frequency_current_month", "Class_Freq", "Frequency"], "ไม่พบข้อมูล")
-    months_left = safe_value(row, ["Month_to_end_contract", "Months_Left"], "ไม่พบข้อมูล")
-    charges = safe_value(row, ["Avg_additional_charges_total", "Add_Charges"], "ไม่พบข้อมูล")
-
-    if score >= 0.70:
-        return f"ลูกค้ามีความเสี่ยงสูง ควรรีบติดต่อ เนื่องจากความถี่เข้าใช้บริการเดือนนี้ = {freq}, ระยะสัญญาคงเหลือ = {months_left}, ค่าใช้จ่ายเสริม = {charges}"
-    if score >= 0.40:
-        return f"ลูกค้ามีความเสี่ยงปานกลาง ควรกระตุ้นด้วยโปรโมชันหรือข้อความติดตาม ความถี่เข้าใช้บริการเดือนนี้ = {freq}"
-    return f"ลูกค้ามีความเสี่ยงต่ำ ยังมีพฤติกรรมค่อนข้างปกติ ความถี่เข้าใช้บริการเดือนนี้ = {freq}"
-
-
-def build_script(name: str, score: float) -> str:
-    if score >= 0.70:
-        return f"สวัสดีครับคุณ {name} ช่วงนี้ทางยิมเห็นว่าคุณอาจไม่ได้เข้ามาใช้บริการบ่อยเหมือนเดิม เลยอยากชวนกลับมาเริ่มใหม่อีกครั้ง พร้อมมอบสิทธิ์ Personal Trainer ฟรี 1 ครั้งครับ"
-    if score >= 0.40:
-        return f"สวัสดีครับคุณ {name} ทางยิมมีโปรโมชันพิเศษสำหรับสมาชิกที่อยากกลับมาออกกำลังกายอย่างต่อเนื่อง สนใจรับรายละเอียดเพิ่มเติมไหมครับ"
-    return f"สวัสดีครับคุณ {name} ขอบคุณที่ยังเป็นสมาชิกกับทางยิมนะครับ หากต้องการคำแนะนำเรื่องคลาสหรือการออกกำลังกาย สามารถติดต่อทีมงานได้เลยครับ"
-
-
-def row_to_result(row: pd.Series, index: int) -> MemberResult:
-    member_id = str(safe_value(row, ["Member_ID", "Customer_ID", "id", "ID"], f"MEM-{index+1:03d}"))
-    name = str(safe_value(row, ["Name", "Customer_Name", "member_name"], "Unknown Member"))
-    email = str(safe_value(row, ["Email", "Gmail", "email"], ""))
-    phone = str(safe_value(row, ["Phone", "phone"], ""))
-    risk = calculate_risk(row)
-    return MemberResult(
-        id=member_id,
-        name=name,
-        email=email,
-        phone=phone,
-        riskScore=risk,
-        status=get_status(risk),
-        aiInsight=build_insight(row, risk),
-        aiScript=build_script(name, risk),
-        recommendedAction=get_action(risk),
-    )
-
-
+# ── Routes ────────────────────────────────────────────────────────────────────
 @app.get("/")
 def root() -> Dict[str, str]:
-    return {"message": "Gym Churn Backend is running"}
+    return {"message": "Gym Churn Backend v2 is running (ML + Typhoon AI)"}
 
 
 @app.get("/health")
-def health() -> Dict[str, str]:
-    return {"status": "ok"}
+def health() -> Dict[str, Any]:
+    return {
+        "status": "ok",
+        "typhoon": "connected" if _typhoon_client else "not configured (set TYPHOON_API_KEY)",
+    }
 
 
 @app.post("/api/predict/upload")
 async def predict_upload(file: UploadFile = File(...)) -> Dict[str, Any]:
+    # ── 1. ตรวจไฟล์ ────────────────────────────────────────────────────────
     if not file.filename.lower().endswith(".csv"):
         raise HTTPException(status_code=400, detail="กรุณาอัปโหลดไฟล์ .csv เท่านั้น")
 
@@ -192,13 +132,75 @@ async def predict_upload(file: UploadFile = File(...)) -> Dict[str, Any]:
     if df.empty:
         raise HTTPException(status_code=400, detail="ไฟล์ CSV ไม่มีข้อมูล")
 
-    results = [row_to_result(row, i).model_dump() for i, (_, row) in enumerate(df.iterrows())]
-    high = sum(1 for r in results if r["status"] == "High Risk")
-    medium = sum(1 for r in results if r["status"] == "Medium Risk")
-    low = sum(1 for r in results if r["status"] == "Low Risk")
+    if "Churn" not in df.columns:
+        raise HTTPException(
+            status_code=400,
+            detail="ไม่พบคอลัมน์ 'Churn' ในไฟล์ — โมเดลต้องการคอลัมน์นี้สำหรับ training",
+        )
+
+    # ── 2. ML Pipeline ─────────────────────────────────────────────────────
+    try:
+        X, X_train, X_test, y_train, y_test = prepare_features(df)
+        model                                = train_model(X_train, y_train)
+        y_prob, y_pred                       = evaluate_model(model, X_test, y_test)
+        explainer                            = build_explainer(model, X_train)
+        shap_values                          = compute_shap_values(explainer, X_test)
+        report                               = build_report(df, X_test, y_test, y_prob, y_pred, shap_values)
+    except Exception as exc:
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"ML Pipeline error: {exc}")
+
+    # ── 3. LLM (Typhoon) — สร้าง insight + script แบบ parallel ──────────────
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    import threading
+
+    rows = [row for _, row in report.iterrows()]
+    total = len(rows)
+    counter = {"n": 0}
+    lock = threading.Lock()
+
+    def _llm_insight_tracked(row):
+        result = _llm_insight(row)
+        with lock:
+            counter["n"] += 1
+            print(f"[Typhoon] {counter['n']}/{total} ✓", flush=True)
+        return result
+
+    def _llm_script_tracked(row):
+        result = _llm_script(row)
+        print(f"[Script] done", flush=True)
+        return result
+
+    print(f"[...] กำลังสร้าง AI Insight + Script สำหรับ {total} คน (parallel x8)...")
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        insights = list(executor.map(_llm_insight_tracked, rows))
+        scripts  = list(executor.map(_llm_script_tracked,  rows))
+    print(f"[OK] Typhoon AI เสร็จแล้ว ({total} คน)")
+    print("[...] กำลัง build members list...")  # เพิ่มตรงนี้
+
+    members: List[Dict[str, Any]] = []
+    for row, insight, script in zip(rows, insights, scripts):
+        members.append({
+            "id":                _safe_str(row.get("Customer_ID", "")),
+            "name":              _safe_str(row.get("Customer_Name", "")),
+            "email":             _safe_str(row.get("Gmail", "")),
+            "phone":             _safe_str(row.get("Phone", "")),
+            "riskScore":         round(float(row["Probability (%)"]) / 100, 4),
+            "status":            _safe_str(row["Risk_Level"]),
+            "recommendedAction": _safe_str(row["Action"]),
+            "promotion":         _safe_str(row["Promotion"]),
+            "churnReasons":      _safe_str(row["Churn_Reasons"]),
+            "aiInsight":         insight,
+            "aiScript":          script,
+        })
+
+    # ── 4. Summary ─────────────────────────────────────────────────────────
+    high   = sum(1 for m in members if m["status"] == "High Risk")
+    medium = sum(1 for m in members if m["status"] == "Medium Risk")
+    low    = sum(1 for m in members if m["status"] == "Low Risk")
 
     return {
-        "total": len(results),
+        "total":   len(members),
         "summary": {"highRisk": high, "mediumRisk": medium, "lowRisk": low},
-        "members": results,
+        "members": members,
     }

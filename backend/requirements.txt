@@ -3,3 +3,8 @@ uvicorn[standard]==0.34.0
 python-multipart==0.0.20
 pandas==2.2.3
 pydantic==2.10.4
+numpy>=1.26
+scikit-learn>=1.4
+xgboost>=2.0
+shap>=0.45
+openai>=1.0
