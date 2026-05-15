@@ -1,4 +1,5 @@
 import {
+  Search,
   ArrowLeft,
   BrainCircuit,
   Copy,
@@ -22,7 +23,23 @@ export default function AdsView({
   onMarkEmailSent,
 }: AdsViewProps) {
   const [copiedId, setCopiedId] = useState<string | null>(null);
+  const [searchId, setSearchId] = useState("");
+  const [searchQuery, setSearchQuery] = useState("");
 
+  const filteredMembers = useMemo(() => {
+  const base = members.filter((m) => m.riskScore >= 0.4 && !m.emailSent);
+    if (!searchQuery.trim()) return base;
+    const q = searchQuery.trim().toLowerCase();
+    return base.filter(
+      (m) =>
+        m.id.toLowerCase().includes(q) ||
+        m.name.toLowerCase().includes(q) ||
+        (m.email ?? "").toLowerCase().includes(q)
+    );
+  }, [members, searchQuery]);
+
+  const handleSearch = () => setSearchQuery(searchId.trim());
+  
   // หน้า Marketing จะแสดงเฉพาะคนที่ยังไม่ได้ส่งอีเมล และมีความเสี่ยงตั้งแต่ Medium Risk ขึ้นไป
   const pendingMarketingMembers = useMemo(() => {
     return members.filter((m) => m.riskScore >= 0.4 && !m.emailSent);
@@ -72,7 +89,22 @@ export default function AdsView({
           </p>
         </div>
       </div>
-
+      <div className="bg-white p-2 rounded-2xl shadow-sm border border-gray-200 flex items-center gap-2">
+          <div className="relative flex-1">
+            <Search className="absolute left-4 top-3 text-gray-400" size={18} />
+            <input
+              type="text"
+              placeholder="Search Member ID, Name, or Email..."
+              className="w-full bg-transparent py-3 pl-11 pr-4 focus:outline-none text-gray-700"
+              value={searchId}
+              onChange={(e) => setSearchId(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && handleSearch()}
+            />
+          </div>
+          <button className="bg-gray-100 hover:bg-gray-200 text-gray-700 px-6 py-2.5 rounded-xl font-bold text-sm transition-colors cursor-pointer mr-1">
+            Check ID
+          </button>
+        </div>
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
         <div className="bg-white rounded-2xl border border-gray-200 shadow-sm p-5">
           <p className="text-xs text-gray-400 font-black uppercase tracking-widest">

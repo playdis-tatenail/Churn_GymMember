@@ -16,32 +16,7 @@ export interface Member {
   emailSent?: boolean;
 }
 
-const initialData: Member[] = [
-  {
-    id: "MEM-001",
-    name: "สมชาย รักยิม",
-    email: "somchai@example.com",
-    riskScore: 0.85,
-    status: "High Risk",
-    emailSent: false,
-  },
-  {
-    id: "MEM-002",
-    name: "สมศรี พีคสุด",
-    email: "somsri@example.com",
-    riskScore: 0.12,
-    status: "Low Risk",
-    emailSent: false,
-  },
-  {
-    id: "MEM-003",
-    name: "ไก่ กาเก่กุ้ง",
-    email: "kai@example.com",
-    riskScore: 0.78,
-    status: "High Risk",
-    emailSent: false,
-  },
-];
+const initialData: Member[] = [];
 
 const SENT_EMAIL_STORAGE_KEY = "gym_churn_sent_email_ids";
 const getStatus = (score: number): string =>
