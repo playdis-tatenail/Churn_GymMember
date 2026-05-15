@@ -1,0 +1,4 @@
+Member_ID,Name,Email,Phone,Activity_Score,Avg_class_frequency_current_month,Month_to_end_contract,Avg_additional_charges_total
+MEM-001,Somchai Rakgym,somchai@example.com,0811111111,0.85,0.4,1,0
+MEM-002,Somsri Fit,somsri@example.com,0822222222,0.35,3.0,6,150
+MEM-003,Krit Gym,krit@example.com,0833333333,0.62,1.2,2,25
