@@ -14,6 +14,8 @@ python -m pip install fastapi uvicorn pandas python-multipart
 # หรือ
 pip install -r requirements.txt bash
 python -m uvicorn main:app --host 127.0.0.1 --port 8000
+or
+uvicorn main:app --reload
 
 ```
 
